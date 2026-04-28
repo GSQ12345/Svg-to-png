@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width,initial-scale=1" />
+		<title>SVG Scaler</title>
+		<style>
+			:root{
+				--bg:#0f1720;
+				--panel:#111827;
+				--muted:#94a3b8;
+				--accent:#60a5fa;
+				color-scheme: dark;
+			}
+			html,body{height:100%;}
+			body{
+				margin:0;
+				font-family:system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;
+				background:linear-gradient(180deg,var(--bg),#031024 60%);
+				display:flex;
+				align-items:center;
+				justify-content:center;
+				padding:24px;
+			}
+			.container{
+				width:980px;
+				max-width:100%;
+				display:grid;
+				grid-template-columns:360px 1fr;
+				gap:20px;
+			}
+			.panel{
+				background:var(--panel);
+				padding:16px;
+				border-radius:12px;
+				box-shadow:0 6px 18px rgba(2,6,23,0.6);
+			}
+			.header{
+				display:flex;
+				gap:8px;
+				align-items:center;
+				margin-bottom:12px;
+			}
+			.h1{font-size:18px;font-weight:600;color:#fff}
+			.small{font-size:12px;color:var(--muted)}
+			.drop{
+				border:2px dashed rgba(148,163,184,0.12);
+				padding:18px;border-radius:10px;text-align:center;cursor:pointer;
+			}
+			.preview{
+				height:80vh;min-height:320px;background:#071226;border-radius:12px;display:flex;align-items:center;justify-content:center;overflow:auto;padding:16px;
+			}
+			.preview svg {
+				max-width:100%;
+				height:auto;
+				display:block;
+			}
+			.controls{display:flex;flex-direction:column;gap:12px;margin-top:12px}
+			.row{display:flex;gap:8px;align-items:center}
+			input[type=range]{width:100%}
+			button{background:var(--accent);border:0;padding:10px 12px;border-radius:8px;color:#04263b;font-weight:600;cursor:pointer}
+			button:disabled{opacity:0.45;cursor:not-allowed}
+			pre{white-space:pre-wrap;color:var(--muted);font-size:12px;margin:0}
+			.svg-wrapper{display:flex;align-items:center;justify-content:center;padding:8px;background:linear-gradient(180deg,#07172a,#041224);border-radius:6px}
+		</style>
+	</head>
+	<body>
+		<div class="container">
+			<div class="panel">
+				<div class="header">
+					<div class="h1">SVG Scaler</div>
+					<div class="small">upload, preview and export a scaled SVG</div>
+				</div>
+				<label class="drop" id="dropzone">Drop an .svg file here or click to choose
+					<input id="file" type="file" accept="image/svg+xml" style="display:none" />
+				</label>
+				<div class="controls">
+					<div class="row">
+						<label style="min-width:80px" class="small">Scale</label>
+						<input id="scale" type="range" min="1" max="400" value="100" />
+						<div id="scaleVal" class="small">100%</div>
+					</div>
+					<div class="row">
+						<label style="min-width:80px" class="small">Width</label>
+						<input id="width" type="number" min="1" placeholder="auto" />
+						<label class="small">px</label>
+					</div>
+					<div class="row">
+						<label style="min-width:80px" class="small">Height</label>
+						<input id="height" type="number" min="1" placeholder="auto" />
+						<label class="small">px</label>
+					</div>
+					<div class="row">
+						<label style="min-width:80px" class="small">Preserve aspect</label>
+						<input id="preserve" type="checkbox" checked />
+					</div>
+					<div class="row">
+						<button id="apply" disabled>Apply & Preview</button>
+						<button id="download" disabled>Download SVG</button>
+					</div>
+					<details>
+						<summary class="small">Original SVG source (for debugging)</summary>
+						<pre id="source">No file loaded.</pre>
+					</details>
+				</div>
+			</div>
+
+			<div class="panel preview" id="preview">
+				<div class="small">No preview — load an SVG to begin.</div>
+			</div>
+		</div>
+
+		<script>
+			const dropzone = document.getElementById('dropzone')
+			const fileIn = document.getElementById('file')
+			const preview = document.getElementById('preview')
+			const source = document.getElementById('source')
+			const applyBtn = document.getElementById('apply')
+			const downloadBtn = document.getElementById('download')
+			const scale = document.getElementById('scale')
+			const scaleVal = document.getElementById('scaleVal')
+			const widthInput = document.getElementById('width')
+			const heightInput = document.getElementById('height')
+			const preserve = document.getElementById('preserve')
+
+			let originalText = ''
+			let parsedSVG = null
+			let currentBlob = null
+
+			function setButtons(enabled){
+				applyBtn.disabled = !enabled
+				downloadBtn.disabled = !enabled
+			}
+
+			scale.addEventListener('input', ()=>{
+				scaleVal.textContent = scale.value + '%'
+			})
+
+			dropzone.addEventListener('click', ()=>fileIn.click())
+			fileIn.addEventListener('change', handleFiles)
+
+			dropzone.addEventListener('dragover', (e)=>{e.preventDefault();dropzone.style.opacity=0.9})
+			dropzone.addEventListener('dragleave', ()=>{dropzone.style.opacity=''} )
+			dropzone.addEventListener('drop', (e)=>{e.preventDefault();dropzone.style.opacity=''; if(e.dataTransfer.files.length) handleFiles({target:{files:e.dataTransfer.files}})})
+
+			function safeParse(text){
+				const parser = new DOMParser()
+				const doc = parser.parseFromString(text, 'image/svg+xml')
+				const svg = doc.querySelector('svg')
+				if(!svg) throw new Error('No <svg> root found')
+				return svg
+			}
+
+			// compute an accurate bbox by rendering a hidden clone in the document
+			function computeBBox(svgElement){
+				// clone and move children into a wrapper so getBBox covers visible content
+				const tmp = svgElement.cloneNode(true)
+				// ensure namespace
+				if(!tmp.getAttribute('xmlns')) tmp.setAttribute('xmlns','http://www.w3.org/2000/svg')
+				// wrap children in a <g> so we can call getBBox reliably
+				const g = document.createElementNS('http://www.w3.org/2000/svg','g')
+				while(tmp.firstChild) g.appendChild(tmp.firstChild)
+				tmp.appendChild(g)
+
+				// place offscreen but attached so measurement works
+				tmp.style.position = 'absolute'
+				tmp.style.left = '-9999px'
+				tmp.style.top = '-9999px'
+				tmp.style.visibility = 'hidden'
+				document.body.appendChild(tmp)
+
+				let bb
+				try{
+					bb = g.getBBox()
+				}catch(e){
+					// fallback to viewBox if present
+					const vb = svgElement.getAttribute('viewBox')
+					if(vb){
+						const parts = vb.split(/\s+/).map(Number)
+						bb = {x:parts[0], y:parts[1], width:parts[2], height:parts[3]}
+					}else{
+						bb = {x:0,y:0,width:parseFloat(svgElement.getAttribute('width'))||300,height:parseFloat(svgElement.getAttribute('height'))||150}
+					}
+				}
+
+				tmp.remove()
+				return bb
+			}
+
+			function handleFiles(e){
+				const f = e.target.files[0]
+				if(!f) return
+				if(f.type !== 'image/svg+xml' && !f.name.toLowerCase().endsWith('.svg')){
+					alert('Please provide an SVG file.')
+					return
+				}
+				const reader = new FileReader()
+				reader.onload = ()=>{
+					originalText = reader.result
+					source.textContent = originalText.slice(0, 2000) + (originalText.length>2000? '\n\n... (truncated)':'')
+					try{
+						const svg = safeParse(originalText)
+
+						// compute bounding box and attach it to the element for later use
+						const bbox = computeBBox(svg)
+						svg.__computedBBox = bbox
+
+						// set a sensible viewBox that matches the content
+						svg.setAttribute('viewBox', `${bbox.x} ${bbox.y} ${bbox.width} ${bbox.height}`)
+						// allow CSS to control rendered size in preview
+						svg.removeAttribute('width')
+						svg.removeAttribute('height')
+
+						parsedSVG = svg
+						setButtons(true)
+						renderPreview(svg)
+					}catch(err){
+						alert('Failed to parse SVG: ' + err.message)
+						setButtons(false)
+					}
+				}
+				reader.readAsText(f)
+			}
+
+			function renderPreview(svgNode){
+				preview.innerHTML = ''
+				const wrap = document.createElement('div')
+				wrap.className = 'svg-wrapper'
+				const clone = svgNode.cloneNode(true)
+				// ensure the clone scales to the wrapper while keeping aspect ratio
+				clone.setAttribute('preserveAspectRatio', 'xMidYMid meet')
+				clone.style.maxWidth = '100%'
+				clone.style.height = 'auto'
+				wrap.appendChild(clone)
+				preview.appendChild(wrap)
+			}
+
+			applyBtn.addEventListener('click', ()=>{
+				if(!parsedSVG) return
+				const scalePct = Number(scale.value)/100
+				// work on a clone so we don't mutate the loaded original
+				const svg = parsedSVG.cloneNode(true)
+
+				// ensure bbox is available (recompute if necessary)
+				let bbox = parsedSVG.__computedBBox
+				if(!bbox){
+					bbox = computeBBox(parsedSVG)
+					svg.setAttribute('viewBox', `${bbox.x} ${bbox.y} ${bbox.width} ${bbox.height}`)
+				}
+
+				// derive target width/height
+				let targetW = widthInput.value ? Number(widthInput.value) : Math.round(bbox.width * scalePct)
+				let targetH = heightInput.value ? Number(heightInput.value) : Math.round(bbox.height * scalePct)
+
+				if(preserve.checked){
+					const aspect = bbox.width / bbox.height
+					if(targetW && !targetH) targetH = Math.round(targetW / aspect)
+					if(targetH && !targetW) targetW = Math.round(targetH * aspect)
+				}
+
+				// if neither provided, fall back to bbox scaled
+				if(!targetW) targetW = Math.round(bbox.width * scalePct)
+				if(!targetH) targetH = Math.round(bbox.height * scalePct)
+
+				svg.setAttribute('width', targetW)
+				svg.setAttribute('height', targetH)
+				svg.setAttribute('preserveAspectRatio','xMidYMid meet')
+
+				const serializer = new XMLSerializer()
+				const text = serializer.serializeToString(svg)
+				currentBlob = new Blob([text], {type:'image/svg+xml'})
+				renderPreview(svg)
+				setButtons(true)
+			})
+
+			downloadBtn.addEventListener('click', ()=>{
+				if(!currentBlob) return
+				const a = document.createElement('a')
+				a.href = URL.createObjectURL(currentBlob)
+				a.download = 'scaled.svg'
+				document.body.appendChild(a)
+				a.click()
+				setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()}, 1500)
+			})
+		</script>
+	</body>
+</html>
